@@ -5,6 +5,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+HW2.streamlit/secrets.toml
+
 # C extensions
 *.so
 
