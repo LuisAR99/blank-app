@@ -1,3 +1,5 @@
 streamlit
 openai
 pdfplumber
+bs4
+groq
