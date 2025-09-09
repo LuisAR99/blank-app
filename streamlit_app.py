@@ -7,8 +7,8 @@ st.write(
 
 st.set_page_config(page_title="Multi-Page Labs", page_icon="🧪")
 
-lab2 = st.Page("HW1.py", title="HW1")
-lab1 = st.Page("HW2.py", title="HW2")
+HW1 = st.Page("HW1.py", title="HW1")
+HW2 = st.Page("HW2.py", title="HW2")
 
 nav = st.navigation(pages=[HW2, HW1])   
 nav.run()
