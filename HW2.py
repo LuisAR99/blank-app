@@ -1,52 +1,42 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
+
 from openai import OpenAI
 try:
     from groq import Groq
 except Exception:
     Groq = None
 
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
 st.set_page_config(page_title="HW 2 — URL Summarizer", page_icon="🧪")
-st.title("🧪 HW 2 — URL Summarizer (OpenAI + Groq + Hugging Face)")
+st.title("🧪 HW 2 — URL Summarizer (OpenAI + Groq + Gemini)")
 
-# ---------------------------
-# Sidebar: Summary Options
-# ---------------------------
+# ---------- Sidebar ----------
 st.sidebar.header("Summary Options")
-
 summary_choice = st.sidebar.radio(
     "Choose a summary style:",
     ["100-word summary", "Two connected paragraphs", "Five bullet points"],
     index=0,
 )
-
-language = st.sidebar.selectbox(
-    "Output language:",
-    ["English", "Spanish", "Italian"],
-    index=0,
-)
-
-provider = st.sidebar.selectbox(
-    "LLM Provider:",
-    ["OpenAI", "Groq", "Hugging Face"],
-    index=0,
-)
-
+language = st.sidebar.selectbox("Output language:", ["English", "Spanish", "Italian"], index=0)
+provider = st.sidebar.selectbox("LLM Provider:", ["OpenAI", "Groq (free)", "Gemini (free)"], index=0)
 use_advanced = st.sidebar.checkbox("Use Advanced Model", value=False)
 
 # Model maps
 OPENAI_MODELS = {"advanced": "gpt-4o", "basic": "gpt-4o-mini"}
-GROQ_MODELS   = {"advanced": "llama-3.3-70b-versatile", "basic": "llama-3.1-8b-instant"}
-HF_MODELS = {
-    "advanced": "google/flan-t5-base",
-    "basic":    "t5-small",
-}
+GROQ_MODELS   = {"advanced": "llama-3.3-70b-versatile", "basic": "llama-3.1-8b-instant"}  # updated
+GEMINI_MODELS = {"advanced": "gemini-1.5-pro", "basic": "gemini-1.5-flash"}
 
+# ---------- URL input ----------
 url = st.text_input("Enter a URL to summarize (http/https):", placeholder="https://example.com/article")
 
+# ---------- Helpers ----------
 def read_url_content(target_url: str) -> str:
-    """Fetch and clean text from a URL."""
     try:
         resp = requests.get(target_url, timeout=20)
         resp.raise_for_status()
@@ -69,9 +59,7 @@ def build_instruction(choice: str, lang: str) -> str:
         style = "Summarize the document in exactly five concise bullet points (one sentence each)."
     return f"{style} Write the output in {lang}. Only return the summary."
 
-# ---------------------------
-# Provider implementations
-# ---------------------------
+# ---------- Providers ----------
 def summarize_with_openai(text: str, instruction: str) -> str:
     api_key = st.secrets["OPENAI_API_KEY"]
     client = OpenAI(api_key=api_key, timeout=60, max_retries=2)
@@ -85,7 +73,7 @@ def summarize_with_openai(text: str, instruction: str) -> str:
 
 def summarize_with_groq(text: str, instruction: str) -> str:
     if Groq is None:
-        raise RuntimeError("Groq SDK not installed. Add `groq` to requirements.")
+        raise RuntimeError("groq SDK not installed. Add `groq` to requirements.txt.")
     api_key = st.secrets["GROQ_API_KEY"]
     client = Groq(api_key=api_key)
     model = GROQ_MODELS["advanced" if use_advanced else "basic"]
@@ -100,59 +88,51 @@ def summarize_with_groq(text: str, instruction: str) -> str:
     )
     return resp.choices[0].message.content.strip()
 
-def summarize_with_hf(text: str, instruction: str) -> str:
-    api_key = st.secrets["HF_API_KEY"]
-    model_id = HF_MODELS["advanced" if use_advanced else "basic"]
+def summarize_with_gemini(text: str, instruction: str) -> str:
+    if genai is None:
+        raise RuntimeError("google-generativeai not installed. Add `google-generativeai` to requirements.txt.")
+    api_key = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=api_key)
+    model_name = GEMINI_MODELS["advanced" if use_advanced else "basic"]
+    model = genai.GenerativeModel(model_name)
     prompt = f"{instruction}\n\n--- DOCUMENT START ---\n{text}\n--- DOCUMENT END ---"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {"max_new_tokens": 512, "temperature": 0.2},
-        "options": {"wait_for_model": True},
-    }
-    r = requests.post(f"https://api-inference.huggingface.co/models/{model_id}",
-                      headers=headers, json=payload, timeout=90)
-    r.raise_for_status()
-    data = r.json()
-    if isinstance(data, list) and data and "generated_text" in data[0]:
-        return data[0]["generated_text"].strip()
-    return str(data).strip()
+    resp = model.generate_content(prompt)
+    return (resp.text or "").strip()
 
 PROVIDER_FN = {
     "OpenAI": summarize_with_openai,
-    "Groq": summarize_with_groq,
-    "Hugging Face": summarize_with_hf,
+    "Groq (free)": summarize_with_groq,
+    "Gemini (free)": summarize_with_gemini,
 }
 
-# ---------------------------
-# Main flow
-# ---------------------------
+# ---------- Main ----------
 if url:
     with st.spinner("Fetching URL…"):
-        document = read_url_content(url)
+        doc_text = read_url_content(url)
 
-    if not document.strip():
+    if not doc_text.strip():
         st.error("No text extracted from the URL.")
-        st.stop()
+    else:
+        # keep prompts reasonable
+        doc_text = doc_text[:25_000]
+        instruction = build_instruction(summary_choice, language)
 
-    instruction = build_instruction(summary_choice, language)
-    doc_for_prompt = document[:25_000]  # safety cutoff
-
-    try:
-        summary = PROVIDER_FN[provider](doc_for_prompt, instruction)
-        st.subheader("Summary")
-        if summary_choice == "Five bullet points" and not summary.lstrip().startswith("-"):
-            lines = [ln for ln in summary.splitlines() if ln.strip()]
-            if len(lines) >= 3:
-                st.markdown("\n".join([f"- {ln}" for ln in lines]))
+        try:
+            summary = PROVIDER_FN[provider](doc_text, instruction)
+            st.subheader("Summary")
+            if summary_choice == "Five bullet points" and not summary.lstrip().startswith("-"):
+                lines = [ln for ln in summary.splitlines() if ln.strip()]
+                if len(lines) >= 3:
+                    st.markdown("\n".join([f"- {ln}" for ln in lines]))
+                else:
+                    st.write(summary)
             else:
                 st.write(summary)
-        else:
-            st.write(summary)
-        st.caption(f"Provider: {provider} • Model tier: {'advanced' if use_advanced else 'basic'}")
-    except KeyError as ke:
-        st.error(f"Missing secret: {ke}. Please add it in .streamlit/secrets.toml.")
-    except Exception as e:
-        st.error(f"Failed to summarize with {provider}: {e}")
+
+            st.caption(f"Provider: {provider} • Model tier: {'advanced' if use_advanced else 'basic'}")
+        except KeyError as ke:
+            st.error(f"Missing secret: {ke}. Add it in .streamlit/secrets.toml.")
+        except Exception as e:
+            st.error(f"Failed to summarize with {provider}: {e}")
 else:
     st.info("Enter a URL above to generate a summary.")
