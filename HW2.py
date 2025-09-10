@@ -38,7 +38,7 @@ use_advanced = st.sidebar.checkbox("Use Advanced Model", value=False)
 # Model maps
 OPENAI_MODELS = {"advanced": "gpt-4o", "basic": "gpt-4o-mini"}
 GROQ_MODELS   = {"advanced": "llama-3.3-70b-versatile", "basic": "llama-3.1-8b-instant"}
-HF_MODELS = { "advanced": "mistralai/Mixtral-8x7B-Instruct-v0.1", "basic":    "HuggingFaceH4/zephyr-7b-beta",}
+HF_MODELS = {"advanced": "facebook/bart-large-cnn", "basic":    "sshleifer/distilbart-cnn-12-6"}
 
 url = st.text_input("Enter a URL to summarize (http/https):", placeholder="https://example.com/article")
 
