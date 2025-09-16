@@ -19,8 +19,8 @@ except Exception:
 
 
 # ---------- Page ----------
-st.set_page_config(page_title="HW 3 — Multi-Vendor Chatbot")
-st.title(" HW 3 — Multi-Vendor Chatbot ")
+st.set_page_config(page_title="HW 3 — Multi-Vendor Chatbot", page_icon="🧠")
+st.title("🧠 HW 3 — Multi-Vendor Chatbot (URLs + memory + streaming)")
 
 # ---------- Secrets ----------
 def get_secret(name: str) -> str:
@@ -198,6 +198,7 @@ if user_prompt and user_prompt != st.session_state.last_handled_prompt:
     # Compose final messages (system + optional URLs + memory context)
     messages_for_model = [{"role": "system", "content": SYSTEM_PROMPT}]
     if urls_blob:
+        # Use system to pass context; if Groq has issues, switch this to a 'user' role message
         messages_for_model.append(
             {"role": "system", "content": f"Use the following web context when helpful:\n{urls_blob[:25000]}"}  # keep sane size
         )
@@ -221,71 +222,58 @@ if user_prompt and user_prompt != st.session_state.last_handled_prompt:
             )
             return stream  # Streamlit can directly consume this with st.write_stream
 
-    def stream_groq():
-        if Groq is None:
-            raise RuntimeError("groq SDK not installed.")
-        if not GROQ_KEY:
-            raise RuntimeError("Missing GROQ_API_KEY in secrets.")
+        def stream_groq():
+            if Groq is None:
+                raise RuntimeError("groq SDK not installed.")
+            if not GROQ_KEY:
+                raise RuntimeError("Missing GROQ_API_KEY in secrets.")
 
-        gclient = Groq(api_key=GROQ_KEY)
-        model = selected_model  # e.g., llama-3.3-70b-versatile / llama-3.1-8b-instant
+            gclient = Groq(api_key=GROQ_KEY)
+            model = selected_model
 
-        try:
-        # Try streaming first
-            events = gclient.chat.completions.create(
-                model=model,
-                messages=messages_for_model,
-                temperature=0.2,
-                max_tokens=1200,
-                stream=True,
-            )
-
-            def gen():
-                for ev in events:
-                    # ev.choices[0].delta.content is the typical stream field
-                    try:
-                        delta = getattr(ev.choices[0].delta, "content", None)
-                        if delta:
-                            yield delta
-                    except Exception:
-                        # Some SDKs expose content differently; fallbacks:
-                        try:
-                            m = getattr(ev.choices[0], "message", None)
-                            if m and getattr(m, "content", None):
-                                yield m.content
-                        except Exception:
-                            pass
-            return gen()
-    
-        except Exception as e:
-            # Fallback to non-streaming (still returns text so app won’t break)
-            resp = gclient.chat.completions.create(
-                model=model,
-                messages=messages_for_model,
-                temperature=0.2,
-                max_tokens=1200,
-                stream=False,
-            )
-            # Normalize shape
-            txt = ""
             try:
-                txt = resp.choices[0].message.content or ""
-            except Exception:
-                pass
-    
-            def gen2():
-                yield txt or f"(Groq non-streaming fallback; error was: {e})"
-            return gen2()
-    
+                # Try streaming first
+                events = gclient.chat.completions.create(
+                    model=model,
+                    messages=messages_for_model,
+                    temperature=0.2,
+                    max_tokens=1200,
+                    stream=True,
+                )
+
                 def gen():
                     for ev in events:
                         try:
-                            delta = ev.choices[0].delta.content or ""
+                            delta = getattr(ev.choices[0].delta, "content", None)
                             if delta:
                                 yield delta
                         except Exception:
-                            pass
+                            try:
+                                m = getattr(ev.choices[0], "message", None)
+                                if m and getattr(m, "content", None):
+                                    yield m.content
+                            except Exception:
+                                pass
                 return gen()
+
+            except Exception as e:
+                # Fallback to non-streaming (still returns text so app won’t break)
+                resp = gclient.chat.completions.create(
+                    model=model,
+                    messages=messages_for_model,
+                    temperature=0.2,
+                    max_tokens=1200,
+                    stream=False,
+                )
+                txt = ""
+                try:
+                    txt = resp.choices[0].message.content or ""
+                except Exception:
+                    pass
+
+                def gen2():
+                    yield txt or f"(Groq non-streaming fallback; error was: {e})"
+                return gen2()
 
         def stream_gemini():
             if genai is None:
@@ -295,10 +283,11 @@ if user_prompt and user_prompt != st.session_state.last_handled_prompt:
             genai.configure(api_key=GEMINI_KEY)
             model = genai.GenerativeModel(selected_model)
             prompt = ""
-            # Convert chat to a single prompt; Gemini chat SDK also exists, but text prompt is simplest for streaming
+            # Convert chat to a single prompt; Gemini chat SDK also exists, but this keeps it simple
             for m in messages_for_model:
                 prompt += f"{m['role'].upper()}: {m['content']}\n"
             resp = model.generate_content(prompt, stream=True)
+
             def gen():
                 for chunk in resp:
                     if hasattr(chunk, "text") and chunk.text:
