@@ -1,4 +1,5 @@
 # HW3.py — URL-aware streaming chatbot with pluggable memory + multi-vendor LLMs
+# Providers: OpenAI, Mistral (small latest), Gemini (2.0-flash-lite)
 
 import streamlit as st
 import requests
@@ -8,9 +9,9 @@ import tiktoken
 
 # Optional providers
 try:
-    from groq import Groq
+    from mistralai import Mistral
 except Exception:
-    Groq = None
+    Mistral = None
 
 try:
     import google.generativeai as genai
@@ -29,9 +30,9 @@ def get_secret(name: str) -> str:
     except KeyError:
         return ""
 
-OPENAI_KEY = get_secret("OPENAI_API_KEY")
-GROQ_KEY   = get_secret("GROQ_API_KEY")
-GEMINI_KEY = get_secret("GEMINI_API_KEY")
+OPENAI_KEY  = get_secret("OPENAI_API_KEY")
+MISTRAL_KEY = get_secret("MISTRAL_API_KEY")
+GEMINI_KEY  = get_secret("GEMINI_API_KEY")
 
 # ---------- Sidebar: inputs & options ----------
 st.sidebar.header("Sources (URLs)")
@@ -41,15 +42,17 @@ url2 = st.sidebar.text_input("URL 2", placeholder="https://example.com/article-2
 st.sidebar.header("Model")
 provider = st.sidebar.selectbox(
     "LLM Provider",
-    ["OpenAI", "Groq", "Gemini"],  # three vendors
+    ["OpenAI", "Mistral", "Gemini"],  # three vendors
     index=0,
 )
 use_flagship = st.sidebar.checkbox("Use flagship model", value=True)
 
-# Latest/representative (flagship vs. cheap) picks
-OPENAI_MODELS = {"flagship": "gpt-4o", "cheap": "gpt-4o-mini"}
-GROQ_MODELS   = {"flagship": "llama-3.3-70b-versatile", "cheap": "llama-3.1-8b-instant"}
-GEMINI_MODELS = {"flagship": "gemini-1.5-pro", "cheap": "gemini-1.5-flash"}
+# Model maps
+OPENAI_MODELS  = {"flagship": "gpt-4o",               "cheap": "gpt-4o-mini"}
+# You asked to use Mistral *small latest*. We’ll use that regardless of tier so it’s always the pick.
+MISTRAL_MODELS = {"flagship": "mistral-small-latest", "cheap": "mistral-small-latest"}
+# Gemini flagship set to 2.0 flash lite as requested
+GEMINI_MODELS  = {"flagship": "gemini-2.0-flash-lite","cheap": "gemini-1.5-flash"}
 
 st.sidebar.header("Conversation Memory")
 memory_mode = st.sidebar.selectbox(
@@ -127,7 +130,6 @@ def build_context(messages, mode: str, selected_model_for_tokens: str):
         context = []
         if st.session_state.summary.strip():
             context.append({"role": "system", "content": f"Conversation so far (summary): {st.session_state.summary}"})
-        # add last 6 (light context on top of summary)
         context.extend(last_n(messages, 6))
         return context
     # Token buffer ~2000 tokens
@@ -137,7 +139,6 @@ def build_context(messages, mode: str, selected_model_for_tokens: str):
 def update_summary():
     if not st.session_state.messages:
         return
-    # Summarize last ~10 messages to keep a compact running summary
     recent = st.session_state.messages[-10:]
     text_blob = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
     try:
@@ -153,14 +154,14 @@ def update_summary():
             )
             st.session_state.summary = resp.choices[0].message.content.strip()
     except Exception:
-        pass  # summary is best-effort; ignore failures
+        pass  # best-effort only
 
 def pick_model_name():
     tier = "flagship" if use_flagship else "cheap"
     if provider == "OpenAI":
         return OPENAI_MODELS[tier]
-    if provider == "Groq":
-        return GROQ_MODELS[tier]
+    if provider == "Mistral":
+        return MISTRAL_MODELS[tier]  # both map to mistral-small-latest per your request
     if provider == "Gemini":
         return GEMINI_MODELS[tier]
     return OPENAI_MODELS["cheap"]
@@ -198,7 +199,7 @@ if user_prompt and user_prompt != st.session_state.last_handled_prompt:
     # Compose final messages (system + optional URLs + memory context)
     messages_for_model = [{"role": "system", "content": SYSTEM_PROMPT}]
     if urls_blob:
-        # Use system to pass context; if Groq has issues, switch this to a 'user' role message
+        # If any provider dislikes system-context blobs, change this role to "user"
         messages_for_model.append(
             {"role": "system", "content": f"Use the following web context when helpful:\n{urls_blob[:25000]}"}  # keep sane size
         )
@@ -220,60 +221,31 @@ if user_prompt and user_prompt != st.session_state.last_handled_prompt:
                 stream=True,
                 timeout=60,
             )
-            return stream  # Streamlit can directly consume this with st.write_stream
+            return stream  # Streamlit consumes this via st.write_stream
 
-        def stream_groq():
-            if Groq is None:
-                raise RuntimeError("groq SDK not installed.")
-            if not GROQ_KEY:
-                raise RuntimeError("Missing GROQ_API_KEY in secrets.")
-
-            gclient = Groq(api_key=GROQ_KEY)
-            model = selected_model
-
+        def stream_mistral():
+            if Mistral is None:
+                raise RuntimeError("mistralai SDK not installed.")
+            if not MISTRAL_KEY:
+                raise RuntimeError("Missing MISTRAL_API_KEY in secrets.")
+            mclient = Mistral(api_key=MISTRAL_KEY)
+            # mistralai's chat endpoint doesn't expose delta chunks in the same way here;
+            # we yield the full text as one chunk (still works with st.write_stream).
+            resp = mclient.chat.complete(
+                model=selected_model,  # "mistral-small-latest"
+                messages=messages_for_model,
+                temperature=0.2,
+                max_tokens=1200,
+            )
+            full_text = ""
             try:
-                # Try streaming first
-                events = gclient.chat.completions.create(
-                    model=model,
-                    messages=messages_for_model,
-                    temperature=0.2,
-                    max_tokens=1200,
-                    stream=True,
-                )
-
-                def gen():
-                    for ev in events:
-                        try:
-                            delta = getattr(ev.choices[0].delta, "content", None)
-                            if delta:
-                                yield delta
-                        except Exception:
-                            try:
-                                m = getattr(ev.choices[0], "message", None)
-                                if m and getattr(m, "content", None):
-                                    yield m.content
-                            except Exception:
-                                pass
-                return gen()
-
-            except Exception as e:
-                # Fallback to non-streaming (still returns text so app won’t break)
-                resp = gclient.chat.completions.create(
-                    model=model,
-                    messages=messages_for_model,
-                    temperature=0.2,
-                    max_tokens=1200,
-                    stream=False,
-                )
-                txt = ""
-                try:
-                    txt = resp.choices[0].message.content or ""
-                except Exception:
-                    pass
-
-                def gen2():
-                    yield txt or f"(Groq non-streaming fallback; error was: {e})"
-                return gen2()
+                full_text = resp.choices[0].message.content or ""
+            except Exception:
+                pass
+            def gen():
+                # Yield once (single-chunk 'stream')
+                yield full_text
+            return gen()
 
         def stream_gemini():
             if genai is None:
@@ -281,9 +253,9 @@ if user_prompt and user_prompt != st.session_state.last_handled_prompt:
             if not GEMINI_KEY:
                 raise RuntimeError("Missing GEMINI_API_KEY in secrets.")
             genai.configure(api_key=GEMINI_KEY)
-            model = genai.GenerativeModel(selected_model)
+            model = genai.GenerativeModel(selected_model)  # "gemini-2.0-flash-lite" or "gemini-1.5-flash"
+            # Flatten chat to a single prompt for simplicity
             prompt = ""
-            # Convert chat to a single prompt; Gemini chat SDK also exists, but this keeps it simple
             for m in messages_for_model:
                 prompt += f"{m['role'].upper()}: {m['content']}\n"
             resp = model.generate_content(prompt, stream=True)
@@ -298,8 +270,8 @@ if user_prompt and user_prompt != st.session_state.last_handled_prompt:
             if provider == "OpenAI":
                 stream_obj = stream_openai()
                 assistant_text = st.write_stream(stream_obj)
-            elif provider == "Groq":
-                assistant_text = st.write_stream(stream_groq())
+            elif provider == "Mistral":
+                assistant_text = st.write_stream(stream_mistral())
             else:
                 assistant_text = st.write_stream(stream_gemini())
         except Exception as e:
