@@ -3,3 +3,4 @@ openai
 pdfplumber
 bs4
 google.generativeai 
+tiktoken
