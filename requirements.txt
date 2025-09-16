@@ -4,3 +4,7 @@ pdfplumber
 bs4
 google.generativeai 
 tiktoken
+mistralai>=1.0.0
+requests
+beautifulsoup4
+
