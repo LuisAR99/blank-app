@@ -1,10 +1,4 @@
-# HW4.py — iSchool RAG Chatbot over HTML (student orgs)
-# - Ingests all HTML files from ./docs
-# - Builds a persisted Chroma vector DB once, reuses on subsequent runs
-# - Chunking: exactly TWO mini-docs per source (with slight overlap) per assignment spec
-# - Conversation memory: last 5 Q&A pairs (10 messages)
-# - Three LLM vendors: OpenAI, Mistral, Gemini (pick in sidebar)
-# - Streams the answer and shows which sources were used
+
 
 import streamlit as st
 from openai import OpenAI
