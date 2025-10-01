@@ -9,6 +9,6 @@ mistralai>=1.0.0
 google-generativeai>=0.7.2
 typing
 sys 
-blob
+glob
 
 
