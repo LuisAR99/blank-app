@@ -1,12 +1,3 @@
-# HW7.py — News Info Bot (RAG + LLM Rerank) for a Global Law Firm
-# - Upload (or reuse) a CSV of news stories: builds a persistent Chroma index
-# - Query types: (1) Most interesting news (ranked), (2) News about <topic>
-# - Vendors/Tiers: OpenAI (4o / 4o-mini), Gemini (2.0-flash-lite / 1.5-flash)
-# - Reranking uses recency + heuristic legal relevance + LLM scoring (JSON) for "interestingness"
-# - NEW: Per-article concise summaries generated AFTER ranking (batch JSON call)
-# - Streaming explanation for overall ranking
-# - Includes architecture + evaluation notes in expanders
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -452,45 +443,3 @@ if run:
         else:
             st.info("Gemini key missing; skipping streamed rationale.")
 
-# ------------------------ Architecture & Evaluation ------------
-with st.expander("📐 Architecture (what & why)"):
-    st.markdown("""
-**Pipeline**
-1) **Ingest CSV → Vector DB (Chroma + OpenAI `text-embedding-3-small`)**  
-   Each row becomes a document (title, summary, content, url, date, source, tags).
-2) **Recall**  
-   - *Topic search*: semantic query via Chroma (plus optional keyword filter).  
-   - *Most interesting*: broad recall (top recent) without a query.
-3) **Rerank** *(“interestingness for a global law firm”)*  
-   Final score = 0.45×LLM score (1–10 → 0–1) + 0.35×Recency + 0.20×Legal-keyword heuristic.
-4) **Summarize (NEW)**  
-   Batch JSON call produces 2–3 sentence summaries tailored to a law-firm audience.
-5) **Explain**  
-   Streamed LLM rationale summarizing why the top items ranked highly.
-
-**Why this design?**
-- Vector search ensures semantic match; LLM reranking injects legal impact awareness.
-- Recency & legal-term heuristics stabilize rankings.
-- Batch summarization is cost/latency efficient and consistent across items.
-""")
-
-with st.expander("🧪 Evaluation plan (how do we know rankings are good?)"):
-    st.markdown("""
-**Test tasks**
-- *Most interesting*: Gold annotations (5–10 items) labeled for law-firm relevance.  
-- *Topic queries*: antitrust, sanctions, privacy, AI regulation.
-
-**Checks**
-- **nDCG@K / Precision@K** vs gold labels.
-- **Consistency**: reruns with same CSV produce similar rankings.
-- **Ablations**: remove recency or heuristic; verify ranking quality drops.
-
-**Model comparisons**
-- OpenAI (4o vs 4o-mini) and Gemini (2.0-flash-lite vs 1.5-flash) on:
-  - Match to gold labels (nDCG@10)
-  - Summary correctness/usefulness
-  - Latency/cost
-""")
-
-# ------------------------ Requirements hint --------------------
-st.caption("Requirements: streamlit, pandas, chromadb, pysqlite3-binary, openai, google-generativeai (optional)")
