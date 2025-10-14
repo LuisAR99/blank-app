@@ -12,7 +12,7 @@ HW2 = st.Page("HW2.py", title="HW2")
 HW3 = st.Page("HW3.py", title="HW3")
 HW4 = st.Page("HW4.py", title="HW4")
 HW5 = st.Page("HW5.py", title="HW5")
-HW6 = st.Page("HW7.py", title="HW7)
+HW6 = st.Page("HW7.py", title="HW7")
 
 nav = st.navigation(pages=[HW5, HW4, HW3, HW2, HW1])   
 nav.run()
