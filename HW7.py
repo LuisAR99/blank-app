@@ -1,3 +1,12 @@
+# HW7.py — News Info Bot (RAG + LLM Rerank) for a Global Law Firm
+# - Upload (or reuse) a CSV of news stories: builds a persistent Chroma index
+# - Query types: (1) Most interesting news (ranked), (2) News about <topic>
+# - Vendors/Tiers: OpenAI (4o / 4o-mini), Gemini (2.0-flash-lite / 1.5-flash)
+# - Reranking uses recency + heuristic legal relevance + LLM scoring (JSON) for "interestingness"
+# - NEW: Per-article concise summaries generated AFTER ranking (batch JSON call)
+# - Streaming explanation for overall ranking
+# - Includes architecture + evaluation notes in expanders
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,7 +16,6 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
-import os
 from typing import List, Dict, Any, Tuple
 
 # --- SQLite shim required by Chroma on Streamlit Cloud ---
@@ -96,13 +104,12 @@ def legal_relevance_heuristic(text: str) -> float:
     if not text: return 0.0
     t = text.lower()
     hits = sum(1 for kw in LEGAL_KEYWORDS if kw.lower() in t)
-    return min(1.0, hits / 6.0)  # saturate
+    return min(1.0, hits / 6.0)
 
 def recency_score(d: datetime | None) -> float:
     if not d: return 0.3
-    # 0-1 score with gentle 60-day half-life
     days = (datetime.now(timezone.utc) - d).days
-    return 1.0 / (1.0 + math.exp((days - 30) / 20.0))  # ~sigmoid
+    return 1.0 / (1.0 + math.exp((days - 30) / 20.0))
 
 # ------------------------ Load CSV -----------------------------
 st.subheader("📄 Data")
@@ -183,7 +190,6 @@ st.caption(f"Vector DB ready. Newly indexed: {added}. Total (approx): {collectio
 # ------------------------ Retrieval ----------------------------
 def retrieve_by_topic(query: str, k: int = 30) -> List[Dict[str, Any]]:
     if not query.strip():
-        # If no topic, just return recent top-k by recency
         rows = []
         for i, row in df.reset_index().iterrows():
             rows.append({"row_index": int(i), **row.to_dict()})
@@ -210,7 +216,6 @@ def llm_rank_interesting(items: List[Dict[str, Any]], vendor_key: str, model: st
     Ask the LLM to score 1-10 'interestingness for a global law firm' (JSON only).
     Returns same list with 'llm_score' field added (float).
     """
-    # Prepare compact payload
     pack = []
     for i, r in enumerate(items):
         pack.append({
@@ -239,23 +244,15 @@ def llm_rank_interesting(items: List[Dict[str, Any]], vendor_key: str, model: st
         )
         txt = resp.choices[0].message.content.strip()
     else:
-        # Gemini single-prompt
         gmodel = genai.GenerativeModel(model)
-        txt = gmodel.generate_content(
-            f"{instr}\n\n{json.dumps(pack)}"
-        ).text
+        txt = gmodel.generate_content(f"{instr}\n\n{json.dumps(pack)}").text
 
-    # Parse JSON robustly
     scores = []
     try:
-        # Extract first json block if model added extra text
         m = re.search(r"\[.*\]", txt, flags=re.DOTALL)
-        if m:
-            scores = json.loads(m.group(0))
-        else:
-            scores = json.loads(txt)
+        if m: scores = json.loads(m.group(0))
+        else: scores = json.loads(txt)
     except Exception:
-        # fallback: neutral
         scores = [{"id": i, "score": 5, "rationale": "fallback"} for i in range(len(items))]
 
     by_id = {s.get("id"): float(s.get("score",5)) for s in scores if "id" in s}
@@ -272,7 +269,9 @@ def combine_scores(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for r in rows:
         d = r.get("_parsed_date")
         rs = recency_score(d)
-        lh = legal_relevance_heuristic(" ".join([str(r.get("title","")), str(r.get("summary","")), str(r.get("tags",""))]))
+        lh = legal_relevance_heuristic(" ".join([
+            str(r.get("title","")), str(r.get("summary","")), str(r.get("tags",""))
+        ]))
         ls = float(r.get("llm_score", 5.0))
         ls01 = max(0.0, min(1.0, (ls-1)/9.0))
         final = 0.45*ls01 + 0.35*rs + 0.20*lh
@@ -284,12 +283,70 @@ def combine_scores(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out.sort(key=lambda x: x["_final_score"], reverse=True)
     return out
 
+# -------- NEW: Batch summarize top-ranked items (2–3 sentences each) ----------
+def llm_summarize_top(items: List[Dict[str, Any]], vendor_key: str, model: str) -> Dict[int, str]:
+    """
+    Create concise 2–3 sentence summaries for ranked items (global-law-firm lens).
+    Returns dict: id -> summary. Uses a single JSON-only call for cost/latency.
+    """
+    pack = []
+    for i, r in enumerate(items):
+        # Prefer existing summary; fallback to content (truncate)
+        text = str(r.get("summary") or r.get("content") or "")
+        text = text[:1200]  # trim for token safety
+        pack.append({
+            "id": i,
+            "title": r.get("title","")[:200],
+            "text": text,
+            "source": r.get("source",""),
+            "date": r.get("date",""),
+        })
+
+    instr = (
+        "Write a concise 2–3 sentence summary for each article for a GLOBAL LAW FIRM audience. "
+        "Emphasize legal/regulatory/litigation/M&A/privacy angles and client risk. "
+        "Return STRICT JSON: a list of {id, summary}, where 'summary' ≤ 60 words, no markdown."
+    )
+
+    if vendor_key == "openai":
+        prompt = [
+            {"role":"system","content":instr},
+            {"role":"user","content":json.dumps(pack)}
+        ]
+        resp = openai_client.chat.completions.create(
+            model=model,
+            messages=prompt,
+            temperature=0.2
+        )
+        txt = resp.choices[0].message.content.strip()
+    else:
+        gmodel = genai.GenerativeModel(model)
+        txt = gmodel.generate_content(f"{instr}\n\n{json.dumps(pack)}").text
+
+    results = {}
+    try:
+        m = re.search(r"\[.*\]", txt, flags=re.DOTALL)
+        arr = json.loads(m.group(0) if m else txt)
+        for item in arr:
+            iid = int(item.get("id"))
+            sm = str(item.get("summary","")).strip()
+            if sm:
+                results[iid] = sm
+    except Exception:
+        # Fallback: naive truncation if parsing fails
+        for i, r in enumerate(items):
+            base = str(r.get("summary") or r.get("content") or "")[:200]
+            results[i] = base + ("…" if len(base) == 200 else "")
+    return results
+
 # ------------------------ Run Query ----------------------------
 st.subheader("🔎 Ask")
 colA, colB = st.columns([3,1])
 with colA:
-    user_q = st.text_input("Your question (e.g., 'find the most interesting news', or 'find news about antitrust')",
-                           value="find the most interesting news")
+    user_q = st.text_input(
+        "Your question (e.g., 'find the most interesting news', or 'find news about antitrust')",
+        value="find the most interesting news"
+    )
 with colB:
     run = st.button("Run")
 
@@ -298,23 +355,22 @@ if run:
         if mode.startswith("News about"):
             q = topic.strip() or user_q
             base = retrieve_by_topic(q, k=40)
-            # Quick filter by keyword if topic provided
             if topic.strip():
                 t = topic.lower()
-                base = [r for r in base if t in (" ".join([str(r.get("title","")), str(r.get("summary","")), str(r.get("content","")), str(r.get("tags",""))]).lower())]
-            # If empty fallback to vector results only
+                base = [r for r in base if t in (" ".join([
+                    str(r.get("title","")), str(r.get("summary","")),
+                    str(r.get("content","")), str(r.get("tags",""))
+                ]).lower())]
             if not base:
                 base = retrieve_by_topic(q, k=40)
         else:
-            # most interesting: start from broad recall (no topic)
             base = retrieve_by_topic("", k=40)
 
-        # Keep a compact working set for LLM ranking
         seed = base[:20] if len(base) > 20 else base
 
-        # Get LLM ranking scores
+        # Choose vendor/model for ranking & summaries
         if prov == "gemini" and not GEMINI_API_KEY and vendor == "Gemini":
-            st.warning("Gemini API key missing; falling back to OpenAI for ranking.")
+            st.warning("Gemini API key missing; falling back to OpenAI for ranking/summaries.")
             prov2, model2 = "openai", OPENAI_MODELS["Cheap"]
         else:
             prov2, model2 = prov, model_name
@@ -322,19 +378,29 @@ if run:
         ranked_input = llm_rank_interesting(seed, prov2, model2)
         combined = combine_scores(ranked_input)
 
+        # ---------- NEW: Generate concise summaries for top-k ----------
+        topk = combined[:max_items]
+        summaries = llm_summarize_top(topk, prov2, model2)
+
     # --------------------- Output -------------------------------
     st.subheader("📈 Results")
-    for i, r in enumerate(combined[:max_items], start=1):
+    for i, r in enumerate(topk, start=1):
         with st.container(border=True):
             st.markdown(f"**{i}. {r.get('title','(no title)')}**")
             meta_line = []
             if r.get('source'): meta_line.append(r['source'])
             if r.get('date'):   meta_line.append(r['date'])
             st.caption(" • ".join(meta_line) if meta_line else " ")
-            if r.get("summary"):
-                st.write(r["summary"])
-            elif r.get("content"):
-                st.write(str(r["content"])[:500] + ("…" if len(str(r["content"]))>500 else ""))
+            # NEW: show concise LLM summary
+            sm = summaries.get(i-1, "").strip()
+            if sm:
+                st.write(sm)
+            else:
+                # fallback to original summary/content if no LLM summary
+                if r.get("summary"):
+                    st.write(r["summary"])
+                elif r.get("content"):
+                    st.write(str(r["content"])[:500] + ("…" if len(str(r["content"]))>500 else ""))
             if r.get("url"):
                 st.markdown(f"[Link]({r['url']})")
             st.progress(min(1.0, r["_final_score"]))
@@ -354,16 +420,15 @@ if run:
         "why these items ranked highly, referencing regulatory/litigation/M&A/privacy relevance and recency. "
         "Keep it under 120 words."
     )
-    # Build a compact description of top picks
     top_pack = [{"rank": i+1,
                  "title": r.get("title",""),
                  "source": r.get("source",""),
                  "date": r.get("date",""),
                  "score": round(r["_final_score"],3)}
-                for i, r in enumerate(combined[:max_items])]
-    if prov == "openai":
+                for i, r in enumerate(topk)]
+    if prov2 == "openai":
         stream = openai_client.chat.completions.create(
-            model=model_name,
+            model=model2,
             messages=[
                 {"role":"system","content": rationale_system},
                 {"role":"user","content": json.dumps(top_pack)}
@@ -374,7 +439,7 @@ if run:
         st.write_stream(stream)
     else:
         if genai and GEMINI_API_KEY:
-            gmodel = genai.GenerativeModel(model_name)
+            gmodel = genai.GenerativeModel(model2)
             resp = gmodel.generate_content(
                 f"{rationale_system}\n\n{json.dumps(top_pack)}",
                 stream=True
@@ -398,30 +463,32 @@ with st.expander("📐 Architecture (what & why)"):
    - *Most interesting*: broad recall (top recent) without a query.
 3) **Rerank** *(“interestingness for a global law firm”)*  
    Final score = 0.45×LLM score (1–10 → 0–1) + 0.35×Recency + 0.20×Legal-keyword heuristic.
-4) **Explain**  
+4) **Summarize (NEW)**  
+   Batch JSON call produces 2–3 sentence summaries tailored to a law-firm audience.
+5) **Explain**  
    Streamed LLM rationale summarizing why the top items ranked highly.
 
 **Why this design?**
-- Vector search ensures semantic match; LLM reranking adds legal-domain awareness.
-- Recency & legal-terms heuristics stabilize rankings and reduce LLM variance.
-- Two vendors/two tiers let you compare quality vs cost/latency.
+- Vector search ensures semantic match; LLM reranking injects legal impact awareness.
+- Recency & legal-term heuristics stabilize rankings.
+- Batch summarization is cost/latency efficient and consistent across items.
 """)
 
 with st.expander("🧪 Evaluation plan (how do we know rankings are good?)"):
     st.markdown("""
 **Test tasks**
-- *Most interesting*: Curate a small gold set (5–10 stories annotated by “interesting for global law firm”).  
-- *Topic queries*: e.g., “antitrust”, “sanctions”, “data privacy”, “AI regulation”.
+- *Most interesting*: Gold annotations (5–10 items) labeled for law-firm relevance.  
+- *Topic queries*: antitrust, sanctions, privacy, AI regulation.
 
 **Checks**
-- **Precision@K / nDCG** against the gold annotations (manual or small team labels).
-- **Consistency**: rerun across days; rankings should be stable absent CSV changes.
-- **Ablations**: remove recency or heuristic; check if results degrade (more irrelevant picks).
+- **nDCG@K / Precision@K** vs gold labels.
+- **Consistency**: reruns with same CSV produce similar rankings.
+- **Ablations**: remove recency or heuristic; verify ranking quality drops.
 
 **Model comparisons**
-- Compare OpenAI (4o vs 4o-mini) and Gemini (2.0-flash-lite vs 1.5-flash) on:
+- OpenAI (4o vs 4o-mini) and Gemini (2.0-flash-lite vs 1.5-flash) on:
   - Match to gold labels (nDCG@10)
-  - Explanation quality (briefness, correctness)
+  - Summary correctness/usefulness
   - Latency/cost
 """)
 
